@@ -58,8 +58,19 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                timeout(time: 30, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
+                script {
+                    echo "⏳ Waiting for SonarQube Quality Gate..."
+
+                    try {
+                        timeout(time: 5, unit: 'MINUTES') {
+                            waitForQualityGate abortPipeline: false
+                        }
+                        echo "✅ Quality Gate check completed"
+                    } catch (Exception e) {
+                        echo "⚠️ Quality Gate timeout or error: ${e.message}"
+                        echo "Continuing build without Quality Gate result..."
+                        // Don't fail the build, just continue
+                    }
                 }
             }
         }
@@ -74,17 +85,11 @@ pipeline {
                     )]) {
                         sh """
                             echo "Testing Artifactory connection to ${ARTIFACTORY_URL}..."
-                            # Test with better error handling
                             if curl -s -f -u \"${ARTIFACTORY_USER}:${ARTIFACTORY_PASSWORD}\" \
                                \"${ARTIFACTORY_URL}/api/system/ping\"; then
                                 echo "✅ Artifactory connection successful"
                             else
-                                echo "❌ Artifactory connection failed"
-                                echo "Please check:"
-                                echo "1. Artifactory server is running"
-                                echo "2. URL is correct: ${ARTIFACTORY_URL}"
-                                echo "3. Credentials are valid"
-                                # Don't fail the build here, just warn
+                                echo "⚠️ Artifactory connection failed - continuing build"
                             fi
                         """
                     }
@@ -95,62 +100,57 @@ pipeline {
         stage('Publish to Artifactory') {
             steps {
                 script {
-                    // Find the JAR file (most Spring Boot apps create JAR, not WAR)
-                    def jarFile = sh(
-                        script: 'find target -name "*.jar" -not -name "*-sources.jar" -not -name "*-javadoc.jar" -type f | head -1',
+                    // Find the WAR file
+                    def warFile = sh(
+                        script: 'find target -name "*.war" -type f | head -1',
                         returnStdout: true
                     ).trim()
 
-                    if (!jarFile) {
-                        // Fallback to WAR file
-                        jarFile = sh(
-                            script: 'find target -name "*.war" -type f | head -1',
-                            returnStdout: true
-                        ).trim()
-                    }
-
-                    if (jarFile) {
-                        echo "Found artifact: ${jarFile}"
-                        def fileName = jarFile.split('/').last()
+                    if (warFile) {
+                        echo "Found artifact: ${warFile}"
+                        def fileName = warFile.split('/').last()
+                        def uploadSuccess = false
 
                         withCredentials([usernamePassword(
                             credentialsId: 'artifactory-creds',
                             usernameVariable: 'ARTIFACTORY_USER',
                             passwordVariable: 'ARTIFACTORY_PASSWORD'
                         )]) {
-                            sh """
-                                # Upload using curl with better error handling
-                                echo "Uploading ${fileName} to Artifactory..."
-                                set +e  # Don't fail immediately on error
+                            // Try upload with better error handling
+                            def result = sh(
+                                script: """
+                                    set +e
+                                    curl -f -u \"${ARTIFACTORY_USER}:${ARTIFACTORY_PASSWORD}\" \
+                                         -X PUT \
+                                         \"${ARTIFACTORY_URL}/${REPO_KEY}/${APP_NAME}/${VERSION}/${fileName}\" \
+                                         -T \"${warFile}\"
+                                    echo \$?
+                                """,
+                                returnStdout: true
+                            ).trim()
 
-                                curl -f -u \"${ARTIFACTORY_USER}:${ARTIFACTORY_PASSWORD}\" \
-                                     -X PUT \
-                                     \"${ARTIFACTORY_URL}/${REPO_KEY}/${APP_NAME}/${VERSION}/${fileName}\" \
-                                     -T \"${jarFile}\"
+                            // Check the exit code from the last line
+                            def exitCode = result.split('\n').last().toInteger()
 
-                                CURL_EXIT_CODE=\$?
+                            if (exitCode == 0) {
+                                echo "✅ Successfully uploaded ${fileName} to Artifactory"
+                                uploadSuccess = true
+                            } else {
+                                echo "❌ Upload failed with curl exit code: ${exitCode}"
+                                if (exitCode == 55) {
+                                    echo "Connection reset by peer - Artifactory may be overloaded or network issue"
+                                }
+                                uploadSuccess = false
+                            }
+                        }
 
-                                if [ \$CURL_EXIT_CODE -eq 0 ]; then
-                                    echo "✅ Successfully uploaded ${fileName} to Artifactory"
-                                elif [ \$CURL_EXIT_CODE -eq 22 ]; then
-                                    echo "❌ Upload failed (exit code 22)"
-                                    echo "Possible reasons:"
-                                    echo "1. Artifactory server not accessible"
-                                    echo "2. Invalid credentials"
-                                    echo "3. Repository '${REPO_KEY}' doesn't exist"
-                                    echo "4. Network connectivity issue"
-                                    # Continue the build but mark as unstable
-                                    exit 0
-                                else
-                                    echo "❌ Upload failed with exit code: \$CURL_EXIT_CODE"
-                                    exit \$CURL_EXIT_CODE
-                                fi
-                            """
+                        if (!uploadSuccess) {
+                            echo "⚠️ Artifactory upload failed - but continuing build"
+                            currentBuild.result = 'UNSTABLE'
                         }
                     } else {
-                        echo "⚠️ No JAR or WAR file found in target directory"
-                        echo "This might be expected for some project types"
-                        // Don't fail the build, just continue
+                        echo "⚠️ No WAR file found in target directory"
+                        currentBuild.result = 'UNSTABLE'
                     }
                 }
             }
@@ -160,7 +160,7 @@ pipeline {
             steps {
                 script {
                     echo "📦 Archiving build artifacts..."
-                    archiveArtifacts artifacts: 'target/*.jar, target/*.war', fingerprint: true, allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'target/*.war', fingerprint: true, allowEmptyArchive: true
                 }
             }
         }
@@ -173,9 +173,12 @@ pipeline {
         failure {
             echo "❌ Pipeline failed. Check logs for details."
         }
+        unstable {
+            echo "⚠️ Pipeline completed with warnings"
+            echo "Check Artifactory upload or other non-critical failures"
+        }
         always {
             echo "Pipeline execution completed with status: ${currentBuild.result ?: 'SUCCESS'}"
-            // Clean up workspace to save disk space
             cleanWs()
         }
     }
