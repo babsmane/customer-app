@@ -121,6 +121,10 @@ pipeline {
 
                     if (warFile) {
                         echo "Found WAR file: ${warFile}"
+                        def fileName = sh(
+                            script: "basename \"${warFile}\"",
+                            returnStdout: true
+                        ).trim()
 
                         withCredentials([usernamePassword(
                             credentialsId: 'artifactory-creds',
@@ -132,7 +136,7 @@ pipeline {
                                 echo "Uploading ${warFile} to Artifactory..."
                                 curl -f -u \"${ARTIFACTORY_USER}:${ARTIFACTORY_PASSWORD}\" \
                                      -X PUT \
-                                     \"${ARTIFACTORY_URL}/artifactory/${REPO_KEY}/${APP_NAME}/${VERSION}/$(basename ${warFile})\" \
+                                     \"${ARTIFACTORY_URL}/artifactory/${REPO_KEY}/${APP_NAME}/${VERSION}/${fileName}\" \
                                      -T \"${warFile}\"
 
                                 if [ \$? -eq 0 ]; then
