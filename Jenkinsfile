@@ -25,7 +25,7 @@ pipeline {
         stage('Checkout') {
             steps {
                 git branch: 'develop',
-                    url: 'https://github.com/babsmane/banking-app.git',
+                    url: 'https://github.com/babsmane/customer-app.git',
                     credentialsId: 'github-pat'
             }
         }
