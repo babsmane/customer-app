@@ -9,7 +9,7 @@ pipeline {
         ARTIFACTORY_CREDS = credentials('artifactory-creds')
 
         // Application configuration
-        APP_NAME = "bank-management-service"
+        APP_NAME = "customer-service"
         VERSION = "1.0.0"
         ARTIFACTORY_URL = "http://localhost:8082"
         REPO_KEY = "architech-rep"
